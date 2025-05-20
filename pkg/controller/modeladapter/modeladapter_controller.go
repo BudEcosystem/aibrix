@@ -44,6 +44,7 @@ import (
 	discoverylisters "k8s.io/client-go/listers/discovery/v1"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	retry "k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -460,15 +461,37 @@ func (r *ModelAdapterReconciler) DoReconcile(ctx context.Context, req ctrl.Reque
 }
 
 func (r *ModelAdapterReconciler) updateStatus(ctx context.Context, instance *modelv1alpha1.ModelAdapter, conditions ...metav1.Condition) error {
-	changed := false
-	for _, condition := range conditions {
-		if meta.SetStatusCondition(&instance.Status.Conditions, condition) {
-			changed = true
+	key := types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &modelv1alpha1.ModelAdapter{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
 		}
+
+		// carry over status changes from the provided instance
+		latest.Status = instance.Status
+
+		changed := false
+		for _, condition := range conditions {
+			if meta.SetStatusCondition(&latest.Status.Conditions, condition) {
+				changed = true
+			}
+		}
+		// TODO: sort the conditions based on LastTransitionTime if needed.
+		klog.InfoS("model adapter reconcile", "Update CR status", latest.Name, "changed", changed, "status", latest.Status, "conditions", conditions)
+
+		if err := r.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+
+		// update instance with the latest status for the caller
+		instance.Status = latest.Status
+		return nil
+	})
+	if err != nil {
+		klog.ErrorS(err, "Failed to update ModelAdapter status", "modelAdapter", klog.KObj(instance))
 	}
-	// TODO: sort the conditions based on LastTransitionTime if needed.
-	klog.InfoS("model adapter reconcile", "Update CR status", instance.Name, "changed", changed, "status", instance.Status, "conditions", conditions)
-	return r.Status().Update(ctx, instance)
+	return err
 }
 
 func (r *ModelAdapterReconciler) clearModelAdapterInstanceList(ctx context.Context, instance *modelv1alpha1.ModelAdapter, stalePodName string) error {
