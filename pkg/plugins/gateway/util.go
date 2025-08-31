@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -69,6 +70,40 @@ func validateRequestBody(requestID, requestPath string, requestBody []byte, user
 		}
 		model = completionObj.Model
 		message = completionObj.Prompt
+	} else if requestPath == "/v1/embeddings" {
+		var embeddingReq struct {
+			Input interface{} `json:"input"`
+			Model string      `json:"model"`
+		}
+		if err := json.Unmarshal(requestBody, &embeddingReq); err != nil {
+			klog.ErrorS(err, "error to unmarshal embeddings object", "requestID", requestID, "requestBody", string(requestBody))
+			errRes = buildErrorResponse(envoyTypePb.StatusCode_BadRequest, "error processing request body", HeaderErrorRequestBodyProcessing, "true")
+			return
+		}
+		model = embeddingReq.Model
+		// Convert input to string for message
+		switch v := embeddingReq.Input.(type) {
+		case string:
+			message = v
+		case []interface{}:
+			// Handle array inputs
+			if len(v) > 0 {
+				switch elem := v[0].(type) {
+				case string:
+					message = elem
+				case float64:
+					// Handle token ID (number)
+					message = fmt.Sprintf("Token array input (first token: %v)", elem)
+				case []interface{}:
+					// Handle nested array (number[][])
+					if len(elem) > 0 {
+						if token, ok := elem[0].(float64); ok {
+							message = fmt.Sprintf("Nested token array input (first token: %v)", token)
+						}
+					}
+				}
+			}
+		}
 	} else {
 		errRes = buildErrorResponse(envoyTypePb.StatusCode_NotImplemented, "unknown request path", HeaderErrorRequestBodyProcessing, "true")
 		return
